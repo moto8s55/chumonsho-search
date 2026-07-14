@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>既刊注文書 検索</title>
+<style>
+  :root { --bg:#111; --panel:#1b1b1b; --line:#2c2c2c; --txt:#e8e8e8; --dim:#8a8a8a; --accent:#2ee6a0; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
+         background:var(--bg); color:var(--txt); padding:28px 16px; }
+  .wrap { max-width:820px; margin:0 auto; }
+  h1 { text-align:center; letter-spacing:.18em; color:var(--accent);
+       font-size:22px; font-weight:800; margin:0 0 4px; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  .sub { text-align:center; color:var(--dim); font-size:12px; margin-bottom:22px; }
+  .searchbar { display:flex; gap:10px; }
+  #q { flex:1; background:#0d0d0d; border:1px solid var(--line); color:var(--txt);
+       font-size:18px; padding:14px 16px; border-radius:8px; outline:none; }
+  #q:focus { border-color:var(--accent); }
+  .hint { text-align:center; color:var(--dim); font-size:11px; margin:8px 0 18px; }
+  .count { color:var(--dim); font-size:12px; margin:6px 2px 10px; }
+  .list { list-style:none; padding:0; margin:0; }
+  .item { display:flex; align-items:center; gap:12px; background:var(--panel);
+          border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:8px;
+          text-decoration:none; color:var(--txt); transition:border-color .12s, background .12s; }
+  .item:hover { border-color:var(--accent); background:#202020; }
+  .badge { flex:none; font-size:10px; font-weight:700; letter-spacing:.08em; padding:3px 8px;
+           border-radius:4px; text-transform:uppercase; }
+  .pdf  { background:#3a1414; color:#ff8a8a; }
+  .html { background:#14283a; color:#8ab6ff; }
+  .meta { min-width:0; }
+  .title { font-size:15px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .folder { font-size:11px; color:var(--dim); margin-top:2px;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  mark { background:transparent; color:var(--accent); font-weight:800; }
+  .empty { text-align:center; color:var(--dim); padding:40px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>既刊注文書 SEARCH</h1>
+  <div class="sub">タイトル（ファイル名）で検索 ／ 曖昧検索対応</div>
+  <div class="searchbar">
+    <input id="q" type="search" placeholder="例: 興陽館 / こうよう / 注文書 …" autocomplete="off" autofocus>
+  </div>
+  <div class="hint">全角半角・カタカナ/ひらがな・スペースの違いを無視してヒットします</div>
+  <div class="count" id="count"></div>
+  <ul class="list" id="list"></ul>
+</div>
+
+<script>
+const DATA = [{"title": "（サンプル）興陽館2026春 新刊注文書", "folder": "（サンプル）興陽館2026春フェア", "ext": "pdf", "relpath": "sample/haru.pdf", "url": "#サンプル：build_index.pyを実行すると実データに置き換わります", "key": "興陽館2026春新刊注文書\n興陽館2026春ふぇあ"}, {"title": "（サンプル）こうよう文庫 既刊一覧", "folder": "（サンプル）こうよう文庫", "ext": "html", "relpath": "sample/bunko.html", "url": "#サンプル", "key": "こうよう文庫既刊一覧\nこうよう文庫"}, {"title": "（サンプル）歴史選書 注文書2026", "folder": "（サンプル）歴史選書シリーズ", "ext": "pdf", "relpath": "sample/rekishi.pdf", "url": "#サンプル", "key": "歴史選書注文書2026\n歴史選書しりーず"}];
+
+/* --- 正規化（build_index.py の norm と同じルール） --- */
+function norm(s){
+  s = (s||"").normalize("NFKC").toLowerCase();
+  let out = "";
+  for (const ch of s){
+    const c = ch.codePointAt(0);
+    if (c >= 0x30A1 && c <= 0x30F6) out += String.fromCodePoint(c - 0x60); // カタカナ→ひらがな
+    else out += ch;
+  }
+  return out.replace(/[\s_\-・／/\\　]/g, "");
+}
+
+/* --- 曖昧スコア: 部分一致 > 部分列一致 > 2-gram重なり --- */
+function score(qn, key){
+  if (!qn) return 0.01;
+  const idx = key.indexOf(qn);
+  if (idx >= 0) return 1000 - idx - (key.length - qn.length) * 0.1; // 完全部分一致（前方ほど高い）
+  // 部分列（順番通りに文字が出現）
+  let i = 0;
+  for (const ch of key){ if (ch === qn[i]) i++; if (i === qn.length) break; }
+  if (i === qn.length) return 500 - key.length * 0.1;
+  // 2-gram 重なり（タイポ・語順違いに強い）
+  const grams = q => { const g=[]; for(let k=0;k<q.length-1;k++) g.push(q.slice(k,k+2)); return g; };
+  const qg = grams(qn); if (!qg.length) return 0;
+  let hit = 0; for (const g of qg) if (key.includes(g)) hit++;
+  const ratio = hit / qg.length;
+  return ratio >= 0.5 ? 100 * ratio : 0;
+}
+
+function highlight(title, qn){
+  if (!qn) return escapeHtml(title);
+  const tn = norm(title);
+  const at = tn.indexOf(qn);
+  if (at < 0) return escapeHtml(title); // 位置対応が難しい曖昧一致はハイライトなし
+  // 正規化前後で長さがずれるため、正規化なしの近似ハイライト
+  const raw = title.toLowerCase();
+  const p = raw.indexOf(qn);
+  if (p < 0) return escapeHtml(title);
+  return escapeHtml(title.slice(0,p)) + "<mark>" + escapeHtml(title.slice(p,p+qn.length)) + "</mark>" + escapeHtml(title.slice(p+qn.length));
+}
+function escapeHtml(s){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+const listEl = document.getElementById("list");
+const countEl = document.getElementById("count");
+const qEl = document.getElementById("q");
+
+function render(items){
+  if (!items.length){ listEl.innerHTML = '<div class="empty">該当なし</div>'; return; }
+  const qn = norm(qEl.value);
+  listEl.innerHTML = items.map(e => `
+    <a class="item" href="${e.url}" target="_blank" rel="noopener">
+      <span class="badge ${e.ext==='pdf'?'pdf':'html'}">${e.ext}</span>
+      <span class="meta">
+        <div class="title">${highlight(e.title, qn)}</div>
+        <div class="folder">📁 ${escapeHtml(e.folder)}</div>
+      </span>
+    </a>`).join("");
+}
+
+function run(){
+  const qn = norm(qEl.value);
+  let items;
+  if (!qn){
+    items = DATA.slice();
+    countEl.textContent = `全 ${DATA.length} 件`;
+  } else {
+    items = DATA.map(e => ({e, s: score(qn, e.key)}))
+                .filter(x => x.s > 0)
+                .sort((a,b) => b.s - a.s)
+                .map(x => x.e);
+    countEl.textContent = `${items.length} 件ヒット`;
+  }
+  render(items);
+}
+
+qEl.addEventListener("input", run);
+
+/* データが埋め込まれていない場合は index.json を取りに行く（開発用） */
+if (DATA.length === 0){
+  fetch("index.json").then(r => r.json()).then(d => { DATA.push(...d); run(); }).catch(()=>run());
+} else { run(); }
+</script>
+</body>
+</html>
