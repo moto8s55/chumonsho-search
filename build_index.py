@@ -4,20 +4,23 @@
 
 対象フォルダを走査し、各サブフォルダの「最上位のデータ（代表1件）」を抽出して
 Notion埋め込み用の検索ページ (index.html) と index.json を生成します。
+さらに、代表ファイルをこのリポジトリの files/ にコピーして、GitHub Pages から
+クリックで開けるようにします（ISBN画像と同じ方式）。
 
 使い方（Windows / PowerShell 等）:
     python build_index.py
 
 生成物:
-    - index.json   … 検索インデックス（デバッグ/再利用用）
-    - index.html   … Notionに埋め込む検索ページ（データ埋め込み済み・単体で動く）
+    - index.json   … 検索インデックス（デバッグ用）
+    - index.html   … Notionに埋め込む検索ページ（データ埋め込み済み）
+    - files/…      … 代表ファイル（PDF/HTML）のコピー（公開）
 
-このフォルダ(公開リポジトリのクローン)で `git push` すると、GitHub Actions が
-自動でGitHub Pagesへ公開します。そのURLをNotionで「/埋め込み」して貼り付けてください。
+PUBLISH_CMD を設定しておけば、生成後に自動で git push まで実行します。
 """
 
 import json
 import os
+import shutil
 import unicodedata
 from pathlib import Path
 from urllib.parse import quote
@@ -27,17 +30,18 @@ from urllib.parse import quote
 # 検索対象のルートフォルダ（既刊注文書）
 ROOT = r"C:\Users\moto8\OneDrive\デスクトップ\興陽館共有フォルダ★★★2026_02_20\3 営業共有\営業\旧PCデスクトップ\販売促進\16_注文書関連\既刊注文書"
 
-# 生成後に実行する「公開コマンド」（任意）。空なら公開せずローカル生成のみ。
-#   このリポジトリ(公開リポジトリのクローン)で自動公開する場合の例:
-#     PUBLISH_CMD = 'git add index.html index.json && git commit -m "index更新" && git push'
-#   push すると GitHub Actions が Pages へ自動デプロイします。
-#   ※ Notionの埋め込みは公開URLを見るので、更新を反映するにはこの公開が必要です。
-PUBLISH_CMD = ""
+# 生成後に実行する「公開コマンド」。空なら公開せずローカル生成のみ。
+#   既定で「全部addしてcommit→push」までを自動実行します（＝Notionに自動反映）。
+PUBLISH_CMD = 'git add -A && git commit -m "既刊注文書 更新" && git push'
 
-# OneDriveの共有リンクのベースURL。
-#   - このフォルダ(既刊注文書)をOneDriveで「リンクをコピー」して得たURLを貼る。
-#   - 空のままだと、リンクは付かず（ローカルパスのみ）になります。
-# 例（法人/SharePoint系）: "https://<tenant>-my.sharepoint.com/personal/xxx/Documents/.../既刊注文書"
+# クリックでファイルを開けるようにする方式:
+#   True  … 代表ファイルをこのリポジトリの files/ にコピーし、GitHub Pages から開けるURLにする
+#           （ISBN画像と同じ方式。公開されます）
+#   False … コピーしない（OneDrive URL または file:// になる）
+COPY_FILES_INTO_REPO = True
+FILES_SUBDIR = "files"
+
+# OneDriveの共有リンクのベースURL（COPY_FILES_INTO_REPO=False のとき使用）。
 ONEDRIVE_BASE_URL = ""
 
 # 検索対象にする拡張子
@@ -76,12 +80,14 @@ def pick_representative(files):
     return files[0] if files else None
 
 
-def make_link(abspath: str, relpath: str) -> str:
-    """OneDrive共有リンク（ベースが設定されていれば）を組み立てる。"""
+def make_link(relpath: str, abspath: str) -> str:
+    """ヒット項目を開くためのURL/リンクを組み立てる。"""
+    rel_url = "/".join(quote(part) for part in Path(relpath).parts)
+    if COPY_FILES_INTO_REPO:
+        # GitHub Pages 上の files/ に置いたコピーを開く（相対URL）
+        return f"{FILES_SUBDIR}/{rel_url}"
     if ONEDRIVE_BASE_URL:
-        base = ONEDRIVE_BASE_URL.rstrip("/")
-        rel = "/".join(quote(part) for part in Path(relpath).parts)
-        return f"{base}/{rel}"
+        return f"{ONEDRIVE_BASE_URL.rstrip('/')}/{rel_url}"
     # フォールバック: ローカルパス（同一PCで開く用）
     return "file:///" + abspath.replace("\\", "/")
 
@@ -91,8 +97,15 @@ def build():
     if not root.exists():
         raise SystemExit(f"[エラー] ルートフォルダが見つかりません: {ROOT}")
 
+    out_dir = Path(__file__).resolve().parent
+    files_dir = out_dir / FILES_SUBDIR
+
+    # files/ を毎回作り直して、削除・改名されたファイルを残さない
+    if COPY_FILES_INTO_REPO and files_dir.exists():
+        shutil.rmtree(files_dir)
+
     entries = []
-    seen_folders = set()
+    copied = 0
 
     # ルート直下から順に walk。各フォルダで直下の対象ファイルから代表を1件選ぶ。
     for dirpath, dirnames, filenames in os.walk(root):
@@ -109,6 +122,16 @@ def build():
         folder_name = d.name if d != root else "(ルート)"
         title = rep.stem  # ファイル名（拡張子なし）＝タイトル
 
+        # 代表ファイルを files/ にコピー（公開用）
+        if COPY_FILES_INTO_REPO:
+            dst = files_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(rep, dst)
+                copied += 1
+            except OSError as e:
+                print(f"[警告] コピー失敗: {rep} ({e})")
+
         # 曖昧検索用の索引には「ファイル名」+「フォルダ名」を入れてヒット率を上げる
         haystack = norm(title) + "\n" + norm(folder_name)
 
@@ -118,16 +141,14 @@ def build():
                 "folder": folder_name,
                 "ext": rep.suffix.lower().lstrip("."),
                 "relpath": str(rel).replace("\\", "/"),
-                "url": make_link(str(rep), str(rel)),
+                "url": make_link(str(rel), str(rep)),
                 "key": haystack,
             }
         )
-        seen_folders.add(str(d))
 
     entries.sort(key=lambda e: e["folder"])
 
     # index.json
-    out_dir = Path(__file__).resolve().parent
     (out_dir / "index.json").write_text(
         json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -139,18 +160,18 @@ def build():
     (out_dir / "index.html").write_text(html, encoding="utf-8")
 
     print(f"[完了] {len(entries)} 件のフォルダを索引化しました。")
+    if COPY_FILES_INTO_REPO:
+        print(f"       {copied} 件のファイルを {FILES_SUBDIR}/ にコピーしました（公開）。")
     print(f"  - {out_dir / 'index.json'}")
     print(f"  - {out_dir / 'index.html'}")
-    if not ONEDRIVE_BASE_URL:
-        print("[注意] ONEDRIVE_BASE_URL が未設定です。リンクはローカルパス(file://)になります。")
-        print("       Notion埋め込みからファイルを開くには OneDrive共有URL を設定してください。")
 
     # 公開コマンド（設定されていれば実行）
     if PUBLISH_CMD:
         import subprocess
         print(f"[公開] {PUBLISH_CMD}")
         rc = subprocess.call(PUBLISH_CMD, shell=True, cwd=str(out_dir))
-        print("[公開] 完了" if rc == 0 else f"[公開] 失敗 (exit={rc})")
+        print("[公開] 完了（数十秒でNotionに反映されます）" if rc == 0
+              else f"[公開] 変更なし、または失敗 (exit={rc})")
 
     return len(entries)
 
