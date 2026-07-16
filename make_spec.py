@@ -19,8 +19,9 @@ from pathlib import Path
 import openpyxl
 
 # ===================== 設定 =====================
-# 仕様書Excelの場所（各自の環境に合わせて変更）
-EXCEL = r"C:\Users\moto8\OneDrive\デスクトップ\興陽館共有フォルダ★★★2026_02_20\3 営業共有\営業\旧PCデスクトップ\specification document\specification_.xlsx"
+# 仕様書Excelの場所。ファイルを直接指定してもよいし、フォルダを指定すれば
+# その中の .xlsx を自動で探します（ファイル名が変わっても動くように）。
+EXCEL = r"C:\Users\moto8\OneDrive\デスクトップ\興陽館共有フォルダ★★★2026_02_20\3 営業共有\営業\旧PCデスクトップ\specification document"
 
 # 検索対象の列（この3つが検索ワードになる）
 SEARCH_COLS = ["商品コード", "ISBN", "書名"]
@@ -49,7 +50,25 @@ def cell(v):
     return "" if v is None else str(v).strip()
 
 
+def resolve_excel(path):
+    """ファイル指定ならそのまま。フォルダ指定ならその中の .xlsx を自動選択。"""
+    p = Path(path)
+    if p.is_file():
+        return p
+    folder = p if p.is_dir() else p.parent
+    if not folder.exists():
+        raise SystemExit(f"[エラー] フォルダが見つかりません: {folder}")
+    # 一時ファイル(~$)を除く .xlsx。名前に spec を含むものを優先、無ければ更新が新しい順。
+    xlsx = [f for f in folder.glob("*.xlsx") if not f.name.startswith("~$")]
+    if not xlsx:
+        raise SystemExit(f"[エラー] .xlsx が見つかりません: {folder}")
+    xlsx.sort(key=lambda f: (0 if "spec" in f.name.lower() else 1, -f.stat().st_mtime))
+    return xlsx[0]
+
+
 def build(excel_path=EXCEL, out_path=None):
+    excel_path = resolve_excel(excel_path)
+    print(f"[Excel] {excel_path}")
     wb = openpyxl.load_workbook(excel_path, data_only=True)
     ws = wb.active
     headers = [cell(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
